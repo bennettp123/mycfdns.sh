@@ -1,5 +1,5 @@
 # mycfdns.sh
-A dynamic dns updater for cloudflare, written in bash and python. (Or: how not to do json in bash).
+A dynamic dns updater for cloudflare, written in bash and python.
 
 ## Instructions:
 
