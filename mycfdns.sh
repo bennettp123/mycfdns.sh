@@ -70,6 +70,7 @@ while getopts 'h:z:e:k:li:h' optname; do
   esac
 done
 
+# get ip address
 myIP=''
 if [ "$use_local_iface_address" == "yes" ]; then
   if which ip >/dev/null 2>&1; then
@@ -88,18 +89,15 @@ else
   fi
 fi
 
+# Get zone info
 zoneObject=$(curl --silent -X GET "https://api.cloudflare.com/client/v4/zones?name=${zone}&status=active" -H "Content-Type:application/json" -H "X-Auth-Email: ${authEmail}" -H "X-Auth-Key: ${authKey}")
-
 success=$(echo "${zoneObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["success"]')
 errors=$(echo "${zoneObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["errors"]')
-messages=$(echo "${zoneObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["messages"]')
 count=$(echo "${zoneObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["result_info"]["count"]')
 if [ "${success}" != "True" ]; then
   logger -i -t com.bennettp123.mycfdns "${fqdn}: error fetching zone! ${errors}"
   exit 1
-fi
-
-if [ ${count} -le 0 ]; then
+elif [ ${count} -le 0 ]; then
   logger -i -t com.bennettp123.mycfdns "${fqdn}: zone not found!"
   exit 1
 elif [ ${count} -gt 1 ]; then
@@ -109,14 +107,12 @@ fi
 
 zoneID=$(echo "${zoneObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["result"][0]["id"]')
 
-retval=0
-
-jsonObject=$(curl --silent -X GET "https://api.cloudflare.com/client/v4/zones/${zoneID}/dns_records?type=A&name=${fqdn}" -H "Content-Type:application/json" -H "X-Auth-Email: ${authEmail}" -H "X-Auth-Key: ${authKey}")
-
-success=$(echo "${jsonObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["success"]')
-errors=$(echo "${jsonObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["errors"]')
-messages=$(echo "${jsonObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["messages"]')
-count=$(echo "${jsonObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["result_info"]["count"]')
+# get the current record
+recordObject=$(curl --silent -X GET "https://api.cloudflare.com/client/v4/zones/${zoneID}/dns_records?type=A&name=${fqdn}" -H "Content-Type:application/json" -H "X-Auth-Email: ${authEmail}" -H "X-Auth-Key: ${authKey}")
+success=$(echo "${recordObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["success"]')
+errors=$(echo "${recordObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["errors"]')
+messages=$(echo "${recordObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["messages"]')
+count=$(echo "${recordObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["result_info"]["count"]')
 if [ "${success}" != "True" ]; then
   logger -i -t com.bennettp123.mycfdns "${fqdn}: error fetching record! ${errors}"
   exit 1
@@ -129,17 +125,18 @@ elif [ ${count} -gt 1 ]; then
   exit 1
 fi
 
-currentIP=$(echo "${jsonObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["result"][0]["content"]')
+# quit unless the IP address has changed
+currentIP=$(echo "${recordObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["result"][0]["content"]')
 if [ "${myIP}" = "${currentIP}" ]; then
   logger -i -t com.bennettp123.mycfdns "${fqdn}: ${currentIP} same as ${myIP}: exiting."
   exit 0
 fi
 
-newObject=$(echo "${jsonObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);obj["result"][0]["content"]="'"${myIP}"'";print json.dumps(obj["result"][0])')
-recID=$(echo "${newObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["id"]')
+# update the record
+newRecordObject=$(echo "${recordObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);obj["result"][0]["content"]="'"${myIP}"'";print json.dumps(obj["result"][0])')
+recID=$(echo "${newRecordObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["id"]')
 
-resultObject=$(curl --silent -X PUT "https://api.cloudflare.com/client/v4/zones/${zoneID}/dns_records/${recID}" -H "Content-Type:application/json" -H "X-Auth-Email: ${authEmail}" -H "X-Auth-Key: ${authKey}" --data "${newObject}")
-
+resultObject=$(curl --silent -X PUT "https://api.cloudflare.com/client/v4/zones/${zoneID}/dns_records/${recID}" -H "Content-Type:application/json" -H "X-Auth-Email: ${authEmail}" -H "X-Auth-Key: ${authKey}" --data "${newRecordObject}")
 success=$(echo "${resultObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["success"]')
 errors=$(echo "${resultObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["errors"]')
 messages=$(echo "${resultObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["messages"]')
