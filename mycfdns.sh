@@ -10,6 +10,7 @@ USAGE="Usage:
  -k <key>      : The API authentication key to use
  -l            : Set using local interface address
  -i <iface>    : The interface to use when getting local address. Implies -l
+ -f            : Force update even if the IP address is unchanged
 
 By default, $(basename $0) queries icanhazip.com to determine the public IP address.
 When called with -l or -i, it uses the address of a local interface instead.
@@ -30,13 +31,14 @@ authEmail=''
 authKey=''
 use_local_iface_address='' # set this to 'yes' to use ifconfig to determine local IP addresses.
 iface='eth0' # ignored unless $use_local_iface_address = yes
+force_update=''
 
 if [ "$1" == "--help" ]; then
   printf "%s\n" "$USAGE"
   exit 0
 fi
 
-while getopts 'h:z:e:k:li:h' optname; do
+while getopts 'h:z:e:k:li:f' optname; do
   case "$optname" in
     'h')
       fqdn="$OPTARG"
@@ -56,6 +58,9 @@ while getopts 'h:z:e:k:li:h' optname; do
     'i')
       use_local_iface_address='yes'
       iface="$OPTARG"
+      ;;
+    'f')
+      force_update='yes'
       ;;
     ':')
       echo "No argument value for option $OPTARG"
@@ -82,15 +87,25 @@ if [ "$use_local_iface_address" == "yes" ]; then
     exit 1
   fi
 else
-  myIP=$(curl --silent -4 -x "${http_proxy}" http://icanhazip.com/)
+  myIP=$(curl --fail --silent -4 -x "${http_proxy}" http://icanhazip.com/)
+  curlret=$?
+  if [ ${curlret} -ne 0 ]; then
+    logger -i -t com.bennettp123.mycfdns "${fqdn}: error fetching IP address: exit code ${curlret} and ip ${myIP}"
+    exit 1
+  fi
   if ! echo "${myIP}" | grep -qE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'; then
-    logger -i -t com.bennettp123.mycfdns "${fqdn}: error fetching IP address"
+    logger -i -t com.bennettp123.mycfdns "${fqdn}: error fetching IP address: invalid IP address returned"
     exit 1
   fi
 fi
 
 # Get zone info
-zoneObject=$(curl --silent -X GET "https://api.cloudflare.com/client/v4/zones?name=${zone}&status=active" -H "Content-Type:application/json" -H "X-Auth-Email: ${authEmail}" -H "X-Auth-Key: ${authKey}")
+zoneObject=$(curl --fail --silent -X GET "https://api.cloudflare.com/client/v4/zones?name=${zone}&status=active" -H "Content-Type:application/json" -H "X-Auth-Email: ${authEmail}" -H "X-Auth-Key: ${authKey}")
+curlret=$?
+if [ ${curlret} -ne 0 ]; then
+  logger -i -t com.bennettp123.mycfdns "${fqdn}: error fetching zone: exit code ${curlret} and data returned: ${myIP}"
+  exit 1
+fi
 success=$(echo "${zoneObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["success"]')
 errors=$(echo "${zoneObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["errors"]')
 count=$(echo "${zoneObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["result_info"]["count"]')
@@ -108,7 +123,12 @@ fi
 zoneID=$(echo "${zoneObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["result"][0]["id"]')
 
 # get the current record
-recordObject=$(curl --silent -X GET "https://api.cloudflare.com/client/v4/zones/${zoneID}/dns_records?type=A&name=${fqdn}" -H "Content-Type:application/json" -H "X-Auth-Email: ${authEmail}" -H "X-Auth-Key: ${authKey}")
+recordObject=$(curl --fail --silent -X GET "https://api.cloudflare.com/client/v4/zones/${zoneID}/dns_records?type=A&name=${fqdn}" -H "Content-Type:application/json" -H "X-Auth-Email: ${authEmail}" -H "X-Auth-Key: ${authKey}")
+curlret=$?
+if [ ${curlret} -ne 0 ]; then
+  logger -i -t com.bennettp123.mycfdns "${fqdn}: error fetching record: exit code ${curlret} and data returned: ${myIP}"
+  exit 1
+fi
 success=$(echo "${recordObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["success"]')
 errors=$(echo "${recordObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["errors"]')
 messages=$(echo "${recordObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["messages"]')
@@ -128,15 +148,22 @@ fi
 # quit unless the IP address has changed
 currentIP=$(echo "${recordObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["result"][0]["content"]')
 if [ "${myIP}" = "${currentIP}" ]; then
-  logger -i -t com.bennettp123.mycfdns "${fqdn}: ${currentIP} same as ${myIP}: exiting."
-  exit 0
+  if ! [ "${force_update}" = 'yes' ]; then
+    logger -i -t com.bennettp123.mycfdns "${fqdn}: ${currentIP} same as ${myIP}: exiting."
+    exit 0
+  fi
 fi
 
 # update the record
 newRecordObject=$(echo "${recordObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);obj["result"][0]["content"]="'"${myIP}"'";print json.dumps(obj["result"][0])')
 recID=$(echo "${newRecordObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["id"]')
 
-resultObject=$(curl --silent -X PUT "https://api.cloudflare.com/client/v4/zones/${zoneID}/dns_records/${recID}" -H "Content-Type:application/json" -H "X-Auth-Email: ${authEmail}" -H "X-Auth-Key: ${authKey}" --data "${newRecordObject}")
+resultObject=$(curl --fail --silent -X PUT "https://api.cloudflare.com/client/v4/zones/${zoneID}/dns_records/${recID}" -H "Content-Type:application/json" -H "X-Auth-Email: ${authEmail}" -H "X-Auth-Key: ${authKey}" --data "${newRecordObject}")
+curlret=$?
+if [ ${curlret} -ne 0 ]; then
+  logger -i -t com.bennettp123.mycfdns "${fqdn}: error updating record: exit code ${curlret} and data returned: ${myIP}"
+  exit 1
+fi
 success=$(echo "${resultObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["success"]')
 errors=$(echo "${resultObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["errors"]')
 messages=$(echo "${resultObject}" | python -c 'import json,sys;obj=json.load(sys.stdin);print obj["messages"]')
